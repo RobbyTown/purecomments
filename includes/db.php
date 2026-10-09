@@ -199,8 +199,12 @@ function insert_or_update_webmention(array $config, array $data): int
     $pdo = db($config);
     $existing = fetch_comment_by_source($config, $data['source_url'], $data['post_slug']);
     if ($existing) {
+        $parentId = array_key_exists('parent_id', $data) && $data['parent_id'] !== null
+            ? $data['parent_id']
+            : $existing['parent_id'];
         $stmt = $pdo->prepare(
             'UPDATE comments SET
+                parent_id = :parent_id,
                 name = :name,
                 website = :website,
                 avatar_url = :avatar_url,
@@ -212,6 +216,7 @@ function insert_or_update_webmention(array $config, array $data): int
         );
         $stmt->execute([
             ':id' => $existing['id'],
+            ':parent_id' => $parentId,
             ':name' => $data['name'],
             ':website' => $data['website'] ?? null,
             ':avatar_url' => $data['avatar_url'] ?? null,

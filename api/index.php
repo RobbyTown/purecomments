@@ -173,9 +173,12 @@ function handle_webmention_endpoint(array $config): void
     $isReaction = in_array($fetchResult['type'], ['like', 'repost'], true);
     $status = ($isReaction && $autoApproveReactions) || (!$isReaction && $autoApproveReplies) ? 'published' : 'pending';
 
+    $inReplyToUrls = $fetchResult['in_reply_to'] ?? [];
+    $parentId = resolve_webmention_parent_id($config, $slug, $inReplyToUrls, $target);
+
     $commentId = insert_or_update_webmention($config, [
         'post_slug' => $slug,
-        'parent_id' => null,
+        'parent_id' => $parentId,
         'name' => $fetchResult['name'],
         'website' => $fetchResult['website'],
         'avatar_url' => $fetchResult['avatar_url'],

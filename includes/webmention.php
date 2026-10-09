@@ -173,6 +173,7 @@ function parse_microformats_or_html(string $html, string $sourceUrl, string $tar
 
     // Determine type: like, repost, reply, or mention
     $type = 'mention';
+    $inReplyToUrls = [];
 
     $likeNodes = $xpath->query('//*[contains(concat(" ", normalize-space(@class), " "), " u-like-of ") or contains(concat(" ", normalize-space(@class), " "), " u-like ")]');
     if ($likeNodes && $likeNodes->length > 0) {
@@ -186,10 +187,33 @@ function parse_microformats_or_html(string $html, string $sourceUrl, string $tar
         }
     }
 
-    if ($type === 'mention') {
-        $replyNodes = $xpath->query('//*[contains(concat(" ", normalize-space(@class), " "), " u-in-reply-to ")]');
-        if ($replyNodes && $replyNodes->length > 0) {
+    $replyNodes = $xpath->query('//*[contains(concat(" ", normalize-space(@class), " "), " u-in-reply-to ")] | //link[@rel="in-reply-to"] | //a[@rel="in-reply-to"]');
+    if ($replyNodes && $replyNodes->length > 0) {
+        if ($type === 'mention') {
             $type = 'reply';
+        }
+        foreach ($replyNodes as $rNode) {
+            $href = $rNode->getAttribute('href') ?: $rNode->getAttribute('value') ?: $rNode->getAttribute('src');
+            if (!$href) {
+                $citeUrls = $xpath->query('.//*[contains(concat(" ", normalize-space(@class), " "), " u-url ")]', $rNode);
+                if ($citeUrls && $citeUrls->length > 0) {
+                    $href = $citeUrls->item(0)->getAttribute('href') ?: trim($citeUrls->item(0)->textContent);
+                }
+            }
+            if (!$href) {
+                $rawText = trim($rNode->textContent);
+                if (filter_var($rawText, FILTER_VALIDATE_URL)) {
+                    $href = $rawText;
+                }
+            }
+            if ($href) {
+                if (!preg_match('#^https?://#i', $href)) {
+                    $href = resolve_relative_url($finalUrl, $href);
+                }
+                if (filter_var($href, FILTER_VALIDATE_URL)) {
+                    $inReplyToUrls[] = $href;
+                }
+            }
         }
     }
 
@@ -238,15 +262,22 @@ function parse_microformats_or_html(string $html, string $sourceUrl, string $tar
                             $jsonLdImages[] = $imgUrl;
                         }
                     }
-                    if (!empty($item['attachment']) && is_array($item['attachment'])) {
-                        $attachments = isset($item['attachment'][0]) ? $item['attachment'] : [$item['attachment']];
-                        foreach ($attachments as $att) {
-                            if (is_array($att)) {
-                                $attUrl = $att['url'] ?? $att['contentUrl'] ?? '';
-                                if (is_string($attUrl) && $attUrl !== '') {
-                                    $jsonLdImages[] = $attUrl;
+                    if (!empty($item['inReplyTo'])) {
+                        $rawReplies = is_array($item['inReplyTo']) ? $item['inReplyTo'] : [$item['inReplyTo']];
+                        foreach ($rawReplies as $rep) {
+                            if (is_string($rep) && trim($rep) !== '') {
+                                $inReplyToUrls[] = trim($rep);
+                            } elseif (is_array($rep)) {
+                                if (!empty($rep['id']) && is_string($rep['id'])) {
+                                    $inReplyToUrls[] = trim($rep['id']);
+                                }
+                                if (!empty($rep['url']) && is_string($rep['url'])) {
+                                    $inReplyToUrls[] = trim($rep['url']);
                                 }
                             }
+                        }
+                        if ($type === 'mention') {
+                            $type = 'reply';
                         }
                     }
                 }
@@ -420,6 +451,7 @@ function parse_microformats_or_html(string $html, string $sourceUrl, string $tar
         'content_md' => $contentMd,
         'type' => $type,
         'source_url' => $sourceUrl,
+        'in_reply_to' => array_values(array_unique(array_filter($inReplyToUrls))),
         'created_at' => gmdate('Y-m-d H:i:s'),
     ];
 }
@@ -733,4 +765,154 @@ function is_self_webmention(array $config, array $fetchResult): bool
 
     return false;
 }
+
+/**
+ * Canonicalises a Fediverse or Bridgy status URL into its instance host and status ID.
+ *
+ * @return array{host: string, status_id: string}|null
+ */
+function canonicalize_fediverse_status_info(string $url): ?array
+{
+    $url = trim($url);
+    if ($url === '') {
+        return null;
+    }
+
+    // Recursively unwrap fed.brid.gy/r/ proxy URLs
+    if (preg_match('#^https?://fed\.brid\.gy/r/(https?://.+)#i', $url, $m)) {
+        return canonicalize_fediverse_status_info($m[1]);
+    }
+
+    // Bridgy comment URLs:
+    // e.g. https://brid.gy/comment/mastodon/@user@instance/rootId/statusId
+    // or https://brid.gy/comment/mastodon/instance/user/rootId/statusId
+    if (preg_match('#^https?://(?:www\.)?brid\.gy/comment/mastodon/@?([^/@]+)@([^/@]+)/(\d+)(?:/(\d+))?#i', $url, $m)) {
+        $host = strtolower($m[2]);
+        $statusId = !empty($m[4]) ? $m[4] : $m[3];
+        return ['host' => $host, 'status_id' => $statusId];
+    }
+    if (preg_match('#^https?://(?:www\.)?brid\.gy/comment/mastodon/([^/@]+)/([^/@]+)/(\d+)(?:/(\d+))?#i', $url, $m)) {
+        $host = strtolower($m[1]);
+        $statusId = !empty($m[4]) ? $m[4] : $m[3];
+        return ['host' => $host, 'status_id' => $statusId];
+    }
+
+    $parsed = parse_url($url);
+    if (!isset($parsed['host'])) {
+        return null;
+    }
+    $host = preg_replace('/^www\./i', '', strtolower($parsed['host']));
+    $path = trim($parsed['path'] ?? '', '/');
+
+    // Native Mastodon: /@user/12345 or /users/user/statuses/12345
+    if (preg_match('#^@?[^/]+/(\d+)$#', $path, $m)) {
+        return ['host' => $host, 'status_id' => $m[1]];
+    }
+    if (preg_match('#^users/[^/]+/statuses/(\d+)$#i', $path, $m)) {
+        return ['host' => $host, 'status_id' => $m[1]];
+    }
+
+    // Pleroma / Akkoma / Misskey / GoToSocial: /notice/12345, /notes/12345, /statuses/12345, /objects/12345
+    if (preg_match('#^(?:notice|notes|objects|statuses|display)/([a-zA-Z0-9_.-]+)$#i', $path, $m)) {
+        return ['host' => $host, 'status_id' => $m[1]];
+    }
+
+    return null;
+}
+
+/**
+ * Checks whether two URLs point to the same Fediverse status or Webmention source.
+ */
+function urls_match_fediverse_status(string $urlA, string $urlB): bool
+{
+    $urlA = trim($urlA);
+    $urlB = trim($urlB);
+    if ($urlA === '' || $urlB === '') {
+        return false;
+    }
+
+    if (rtrim($urlA, '/') === rtrim($urlB, '/')) {
+        return true;
+    }
+
+    $cleanA = preg_replace('#^https?://(www\.)?#i', '', rtrim($urlA, '/'));
+    $cleanB = preg_replace('#^https?://(www\.)?#i', '', rtrim($urlB, '/'));
+    if (strcasecmp($cleanA, $cleanB) === 0) {
+        return true;
+    }
+
+    $infoA = canonicalize_fediverse_status_info($urlA);
+    $infoB = canonicalize_fediverse_status_info($urlB);
+
+    if ($infoA !== null && $infoB !== null) {
+        if ($infoA['status_id'] === $infoB['status_id']) {
+            if ($infoA['host'] === '' || $infoB['host'] === '' || strcasecmp($infoA['host'], $infoB['host']) === 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Resolves the parent comment ID for an incoming Webmention based on its in_reply_to candidate URLs.
+ */
+function resolve_webmention_parent_id(array $config, string $slug, array $inReplyToUrls, string $targetUrl): ?int
+{
+    if (empty($inReplyToUrls)) {
+        return null;
+    }
+
+    $pdo = db($config);
+    $stmt = $pdo->prepare('SELECT id, source_url, website FROM comments WHERE post_slug = :slug ORDER BY id ASC');
+    $stmt->execute([':slug' => $slug]);
+    $existingComments = $stmt->fetchAll() ?: [];
+
+    if (empty($existingComments)) {
+        return null;
+    }
+
+    foreach ($inReplyToUrls as $replyUrl) {
+        $replyUrl = trim($replyUrl);
+        if ($replyUrl === '') {
+            continue;
+        }
+
+        // 1. If replyUrl points directly to the blog post itself, it is a top-level reply
+        if (urls_match_fediverse_status($replyUrl, $targetUrl)) {
+            continue;
+        }
+        $resolvedSlug = resolve_target_slug($replyUrl, $config);
+        if ($resolvedSlug === $slug && stripos($replyUrl, 'comment.php') === false) {
+            continue;
+        }
+
+        // 2. Direct PureComments comment URL: e.g. comment.php?id=123
+        if (preg_match('/comment\.php\?id=(\d+)/i', $replyUrl, $m)) {
+            $candidateId = (int)$m[1];
+            foreach ($existingComments as $ec) {
+                if ((int)$ec['id'] === $candidateId) {
+                    return $candidateId;
+                }
+            }
+        }
+
+        // 3. Match against existing comments' source_url or website
+        foreach ($existingComments as $ec) {
+            $sourceUrl = trim((string)($ec['source_url'] ?? ''));
+            if ($sourceUrl !== '' && urls_match_fediverse_status($replyUrl, $sourceUrl)) {
+                return (int)$ec['id'];
+            }
+
+            $website = trim((string)($ec['website'] ?? ''));
+            if ($website !== '' && urls_match_fediverse_status($replyUrl, $website)) {
+                return (int)$ec['id'];
+            }
+        }
+    }
+
+    return null;
+}
+
 
