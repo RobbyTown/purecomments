@@ -173,9 +173,25 @@ Example:
 <link rel="stylesheet" href="https://comments.example.com/public/comments.css">
 ```
 
-`embed.js` only renders markup and behavior, so the visual style is fully up to you. Start with the example file, then adjust spacing, colours, typography, and badges to match your site.
+`embed.js` only renders markup and behaviour, so the visual style is fully up to you. Start with the example file, then adjust spacing, colours, typography, and badges to match your site.
 
-## Admin Behavior
+> **Note on the honeypot field:** The comment form includes an anti-spam honeypot trap field (`.hp-field`). The default `comments.css` hides this off-screen. If you write custom styles from scratch without `comments.css`, be sure to include the `#comments .hp-field` rule so the trap field remains hidden from genuine visitors:
+>
+> ```css
+> #comments .hp-field {
+>   position: absolute;
+>   left: -10000px;
+>   width: 1px;
+>   height: 1px;
+>   margin: 0;
+>   padding: 0;
+>   border: 0;
+>   opacity: 0;
+>   pointer-events: none;
+> }
+> ```
+
+## Admin Behaviour
 
 - Comments are grouped into:
   - Pending comments
